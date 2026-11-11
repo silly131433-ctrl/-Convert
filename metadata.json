@@ -1,0 +1,8 @@
+{
+  "name": "OmniConvert Studio - 智慧高保真全方位文件轉檔神器",
+  "description": "高保真文件與圖面格式轉換工具：支援 PPT 轉 PDF、PDF 轉 Word、圖片轉 PDF/Word/Excel，AI 精確保留原始表格、美編與版面設計配置，提供極速即時預覽與批量下載。",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
