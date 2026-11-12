@@ -44,6 +44,7 @@ interface ConversionQueueProps {
   onDownloadMergedFile: () => void;
   onPreviewMergedFile: () => void;
   isMerging: boolean;
+  defaultMergeFormat?: TargetFormat;
   onReorderFiles: (fromIndex: number, toIndex: number) => void;
 }
 
@@ -63,11 +64,18 @@ export const ConversionQueue: React.FC<ConversionQueueProps> = ({
   onDownloadMergedFile,
   onPreviewMergedFile,
   isMerging,
+  defaultMergeFormat,
   onReorderFiles,
 }) => {
   const [activeTab, setActiveTab] = useState<'mergeOne' | 'individual'>('mergeOne');
-  const [mergeTargetFormat, setMergeTargetFormat] = useState<TargetFormat>('pdf');
+  const [mergeTargetFormat, setMergeTargetFormat] = useState<TargetFormat>(defaultMergeFormat || 'docx');
   const [mergedFileName, setMergedFileName] = useState('OmniConvert_全部檔案合併成果');
+
+  React.useEffect(() => {
+    if (defaultMergeFormat) {
+      setMergeTargetFormat(defaultMergeFormat);
+    }
+  }, [defaultMergeFormat]);
 
   if (files.length === 0) return null;
 

@@ -1,12 +1,13 @@
 import React from 'react';
-import { Presentation, FileText, Image as ImageIcon, FileSpreadsheet, ArrowRight, Check } from 'lucide-react';
+import { Presentation, FileText, Image as ImageIcon, FileSpreadsheet, ArrowRight, Check, Sparkles } from 'lucide-react';
 import { TargetFormat } from '../types/converter';
 
 interface FormatMatrixProps {
-  onSelectPreset: (source: string, target: TargetFormat) => void;
+  onSelectPreset: (cardId: string, source: string, target: TargetFormat) => void;
+  selectedMatrixId: string | null;
 }
 
-export const FormatMatrix: React.FC<FormatMatrixProps> = ({ onSelectPreset }) => {
+export const FormatMatrix: React.FC<FormatMatrixProps> = ({ onSelectPreset, selectedMatrixId }) => {
   const cards = [
     {
       id: 'ppt-pdf',
@@ -14,7 +15,7 @@ export const FormatMatrix: React.FC<FormatMatrixProps> = ({ onSelectPreset }) =>
       sub: '精準維持 16:9 投影片比例、母片排版與文字圖形階層',
       icon: Presentation,
       from: 'PPT / PPTX',
-      to: 'PDF' as TargetFormat,
+      to: 'pdf' as TargetFormat,
       badge: '投影片完整還原',
       color: 'from-orange-500/20 to-red-500/10 border-orange-500/30 text-orange-400',
     },
@@ -70,6 +71,8 @@ export const FormatMatrix: React.FC<FormatMatrixProps> = ({ onSelectPreset }) =>
     },
   ];
 
+  const activeCard = cards.find((c) => c.id === selectedMatrixId);
+
   return (
     <section className="mb-10">
       <div className="flex items-center justify-between mb-4">
@@ -77,7 +80,7 @@ export const FormatMatrix: React.FC<FormatMatrixProps> = ({ onSelectPreset }) =>
           <h2 className="text-base font-semibold text-white flex items-center gap-2">
             <span>支援轉檔格式矩陣</span>
             <span className="text-xs font-normal text-slate-400">
-              (全方位跨格式互轉，嚴格落實版面與表格設計保真)
+              (點擊選取目標模式，後續匯入與轉檔將自動套用，無需重複選擇)
             </span>
           </h2>
         </div>
@@ -86,22 +89,36 @@ export const FormatMatrix: React.FC<FormatMatrixProps> = ({ onSelectPreset }) =>
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3.5">
         {cards.map((card) => {
           const Icon = card.icon;
+          const isSelected = selectedMatrixId === card.id;
+
           return (
             <div
               key={card.id}
-              onClick={() => onSelectPreset(card.from, card.to)}
-              className={`p-4 rounded-xl border bg-gradient-to-br ${card.color} hover:border-indigo-400/60 transition-all cursor-pointer group hover:scale-[1.01] hover:shadow-lg`}
+              onClick={() => onSelectPreset(card.id, card.from, card.to)}
+              className={`p-4 rounded-xl border transition-all cursor-pointer group hover:scale-[1.01] hover:shadow-lg relative ${
+                isSelected
+                  ? 'ring-2 ring-indigo-400 border-indigo-400 bg-indigo-950/80 shadow-lg shadow-indigo-500/25'
+                  : `bg-gradient-to-br ${card.color} hover:border-indigo-400/60`
+              }`}
             >
               <div className="flex items-center justify-between mb-2">
                 <div className="flex items-center gap-2">
-                  <div className="p-2 rounded-lg bg-slate-900/80 border border-slate-700/50">
+                  <div className={`p-2 rounded-lg border ${isSelected ? 'bg-indigo-600 border-indigo-400 text-white' : 'bg-slate-900/80 border-slate-700/50'}`}>
                     <Icon className="w-4 h-4 text-white" />
                   </div>
                   <span className="text-xs font-semibold px-2 py-0.5 rounded-full bg-slate-900/70 border border-slate-700 text-slate-200">
                     {card.badge}
                   </span>
                 </div>
-                <ArrowRight className="w-4 h-4 text-slate-400 group-hover:text-white group-hover:translate-x-1 transition-all" />
+
+                {isSelected ? (
+                  <span className="text-xs font-bold px-2.5 py-0.5 rounded-full bg-indigo-600 text-white flex items-center gap-1 shadow-sm animate-in fade-in">
+                    <Check className="w-3.5 h-3.5" />
+                    <span>已選取模式</span>
+                  </span>
+                ) : (
+                  <ArrowRight className="w-4 h-4 text-slate-400 group-hover:text-white group-hover:translate-x-1 transition-all" />
+                )}
               </div>
 
               <h3 className="text-sm font-bold text-white mb-1">{card.title}</h3>
@@ -116,6 +133,23 @@ export const FormatMatrix: React.FC<FormatMatrixProps> = ({ onSelectPreset }) =>
           );
         })}
       </div>
+
+      {/* Selected Matrix Global Mode Indicator */}
+      {activeCard && (
+        <div className="mt-3.5 p-3 rounded-xl bg-indigo-950/60 border border-indigo-700/60 flex items-center justify-between text-xs text-indigo-200 animate-in fade-in">
+          <div className="flex items-center gap-2">
+            <Sparkles className="w-4 h-4 text-amber-400 shrink-0" />
+            <span className="font-semibold text-white">已選定轉檔模式：</span>
+            <span className="text-cyan-300 font-bold">【{activeCard.title}】</span>
+            <span className="text-slate-300 hidden sm:inline">
+              ➔ 轉檔與合併時將自動套用目標格式 ({activeCard.to.toUpperCase()})，無需額外手動切換！
+            </span>
+          </div>
+          <span className="text-[11px] font-mono uppercase px-2 py-0.5 rounded bg-indigo-900 text-indigo-200 border border-indigo-700">
+            預設: {activeCard.to}
+          </span>
+        </div>
+      )}
     </section>
   );
 };

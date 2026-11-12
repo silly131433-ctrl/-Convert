@@ -18,6 +18,7 @@ import {
   clientConvertImageToDocx,
   clientConvertImageToXlsx,
   clientConvertPptxToPdf,
+  clientConvertPdfToDocx,
   mergeMultipleFilesToOnePdf,
   mergeMultipleFilesToOneDocx,
   mergeMultipleFilesToOneXlsx,
@@ -36,6 +37,10 @@ export default function App() {
   const [selectedPreviewItem, setSelectedPreviewItem] = useState<FileItem | null>(null);
   const [isConvertingAny, setIsConvertingAny] = useState(false);
   const [isMerging, setIsMerging] = useState(false);
+
+  // Selected preset mode from FormatMatrix (default: PDF to Word DOCX as requested)
+  const [selectedMatrixId, setSelectedMatrixId] = useState<string>('pdf-word');
+  const [selectedPresetTarget, setSelectedPresetTarget] = useState<TargetFormat>('docx');
 
   // Merged single file state (Requirement #1: 合併打包成一份檔案)
   const [mergedResult, setMergedResult] = useState<{
@@ -57,7 +62,8 @@ export default function App() {
   const handleFilesSelected = (newFiles: File[]) => {
     const newItems: FileItem[] = newFiles.map((f) => {
       const sourceFormat = detectSourceFormat(f.name, f.type);
-      const targetFormat = getDefaultTargetFormat(sourceFormat);
+      // Auto-assign format based on the selected matrix preset
+      const targetFormat = selectedPresetTarget || getDefaultTargetFormat(sourceFormat);
       let previewUrl: string | undefined;
 
       if (f.type.startsWith('image/')) {
@@ -93,8 +99,10 @@ export default function App() {
     });
   };
 
-  // Preset selector
-  const handleSelectPreset = (_source: string, target: TargetFormat) => {
+  // Preset selector: updates matrix active state and propagates to all pending items
+  const handleSelectPreset = (cardId: string, _source: string, target: TargetFormat) => {
+    setSelectedMatrixId(cardId);
+    setSelectedPresetTarget(target);
     setFiles((prev) =>
       prev.map((f) => (f.status === 'idle' ? { ...f, targetFormat: target } : f))
     );
@@ -151,7 +159,9 @@ export default function App() {
 
         // If server failed or wasn't used, use client-side high fidelity engine
         if (!result) {
-          if (isImg && item.targetFormat === 'docx') {
+          if (ext === 'pdf' && item.targetFormat === 'docx') {
+            result = await clientConvertPdfToDocx(item.file);
+          } else if (isImg && item.targetFormat === 'docx') {
             result = await clientConvertImageToDocx(item.file, fidelityOptions);
           } else if (isImg && item.targetFormat === 'xlsx') {
             result = await clientConvertImageToXlsx(item.file);
@@ -247,14 +257,38 @@ export default function App() {
     setIsMerging(true);
     try {
       const rawFiles = files.map((f) => f.file);
-      let result: { fileName: string; mimeType: string; size: number; base64: string };
+      let result: { fileName: string; mimeType: string; size: number; base64: string } | null = null;
 
-      if (targetFormat === 'pdf') {
-        result = await mergeMultipleFilesToOnePdf(rawFiles, customName);
-      } else if (targetFormat === 'docx') {
-        result = await mergeMultipleFilesToOneDocx(rawFiles, customName);
-      } else {
-        result = await mergeMultipleFilesToOneXlsx(rawFiles, customName);
+      // Try server merge first (supports deep pdf-parse & multi-page layouts)
+      try {
+        const formData = new FormData();
+        rawFiles.forEach((file) => {
+          formData.append('files', file);
+        });
+        formData.append('targetFormat', targetFormat);
+        formData.append('mergedFileName', customName);
+
+        const response = await fetch('/api/convert-merge', {
+          method: 'POST',
+          body: formData,
+        });
+
+        if (response.ok) {
+          result = await response.json();
+        }
+      } catch (serverErr) {
+        console.warn('Server merge request failed, using client engine:', serverErr);
+      }
+
+      // If server was unavailable, use client engine
+      if (!result) {
+        if (targetFormat === 'pdf') {
+          result = await mergeMultipleFilesToOnePdf(rawFiles, customName);
+        } else if (targetFormat === 'docx') {
+          result = await mergeMultipleFilesToOneDocx(rawFiles, customName);
+        } else {
+          result = await mergeMultipleFilesToOneXlsx(rawFiles, customName);
+        }
       }
 
       setMergedResult(result);
@@ -352,7 +386,10 @@ export default function App() {
         </div>
 
         {/* Format Matrix */}
-        <FormatMatrix onSelectPreset={handleSelectPreset} />
+        <FormatMatrix
+          onSelectPreset={handleSelectPreset}
+          selectedMatrixId={selectedMatrixId}
+        />
 
         {/* Drag & Drop Upload Zone */}
         <FileDropZone
@@ -377,6 +414,7 @@ export default function App() {
           onDownloadMergedFile={handleDownloadMergedFile}
           onPreviewMergedFile={handlePreviewMergedFile}
           isMerging={isMerging}
+          defaultMergeFormat={selectedPresetTarget}
           onReorderFiles={handleReorderFiles}
         />
 

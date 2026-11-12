@@ -23,6 +23,9 @@ import {
 import * as XLSX from 'xlsx';
 import { PDFDocument, rgb, StandardFonts } from 'pdf-lib';
 import JSZip from 'jszip';
+import { createRequire } from 'module';
+const require = createRequire(import.meta.url);
+const { PDFParse } = require('pdf-parse');
 
 dotenv.config();
 
@@ -269,6 +272,141 @@ function generateFallbackAnalysis(fileName: string, note?: string): DocumentAnal
         },
       },
     ],
+  };
+}
+
+/**
+ * Intelligent PDF text, headings, clauses, and tables extractor using PDFParse
+ */
+async function parsePdfToDocumentAnalysis(
+  pdfBuffer: Buffer,
+  fileName: string
+): Promise<DocumentAnalysis> {
+  let fullText = '';
+  try {
+    const parser = new PDFParse({ data: pdfBuffer });
+    await parser.load();
+    const textResult = await parser.getText();
+    fullText = textResult?.text || '';
+  } catch (err) {
+    console.warn('PDFParse failed, scanning binary text:', err);
+    const bufStr = pdfBuffer.toString('binary');
+    const matches = Array.from(bufStr.matchAll(/\(([^()]{1,200})\)\s*Tj/g)).map((m) => m[1]);
+    fullText = matches.join('\n');
+  }
+
+  const lines = fullText
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter((l) => l.length > 0);
+
+  const sections: DocumentSection[] = [];
+  const baseName = path.parse(fileName).name;
+  let title = baseName;
+  let subtitle = '';
+
+  // Filter out page footers like "-- 1 of 3 --" or "第 1 页 共 3 页"
+  const cleanLines = lines.filter(
+    (l) =>
+      !/^--\s*\d+\s+of\s+\d+\s*--$/i.test(l) &&
+      !/^第\s*\d+\s*页\s*共\s*\d+\s*页/i.test(l)
+  );
+
+  let lineIdx = 0;
+  if (cleanLines.length > 0) {
+    title = cleanLines[0];
+    lineIdx = 1;
+
+    if (
+      cleanLines.length > 1 &&
+      (cleanLines[1].includes('合同') ||
+        cleanLines[1].includes('协议') ||
+        cleanLines[1].includes('報告') ||
+        cleanLines[1].length < 40)
+    ) {
+      subtitle = title;
+      title = cleanLines[1];
+      lineIdx = 2;
+    }
+  }
+
+  let currentTableRows: string[][] = [];
+
+  const flushTable = () => {
+    if (currentTableRows.length > 0) {
+      const headers = currentTableRows[0];
+      const rows = currentTableRows.slice(1);
+      sections.push({
+        type: 'table',
+        table: {
+          headers,
+          rows: rows.length > 0 ? rows : [headers],
+        },
+      });
+      currentTableRows = [];
+    }
+  };
+
+  while (lineIdx < cleanLines.length) {
+    const line = cleanLines[lineIdx];
+
+    // Check table-like line: columns separated by tabs, pipes, or 2+ spaces
+    const cols = line.split(/\t+|\s{2,}|\|/).map((c) => c.trim()).filter((c) => c.length > 0);
+
+    // Is it an article / section heading? e.g. "第一条、项目概况", "第二条、项目结算", "1.1 派遣方式："
+    const isHeading =
+      /^第[一二三四五六七八九十0-9]+[条章节款]/.test(line) ||
+      (/^[0-9]+(\.[0-9]+)*\s+[^\s]+/.test(line) && line.length < 50);
+
+    if (isHeading) {
+      flushTable();
+      sections.push({
+        type: 'heading',
+        level: line.startsWith('第') ? 1 : 2,
+        text: line,
+      });
+      lineIdx++;
+      continue;
+    }
+
+    // Is it a key-value clause like "甲方：深圳市..." or "乙方：飞傲..."?
+    const kvMatch = line.match(/^([^：:]{2,10})[：:]\s*(.+)$/);
+    if (kvMatch && !isHeading) {
+      flushTable();
+      sections.push({
+        type: 'key_values',
+        keyValues: [{ label: kvMatch[1].trim(), value: kvMatch[2].trim() }],
+      });
+      lineIdx++;
+      continue;
+    }
+
+    // Is it a table row? (e.g. 2-5 columns like "账户名  VA AUTOMATION SOLUTIONS INC.")
+    if (cols.length >= 2 && cols.length <= 5 && line.length < 120) {
+      currentTableRows.push(cols);
+      lineIdx++;
+      continue;
+    } else {
+      flushTable();
+    }
+
+    // Regular paragraph / contract clause
+    sections.push({
+      type: 'paragraph',
+      text: line,
+    });
+    lineIdx++;
+  }
+
+  flushTable();
+
+  return {
+    title,
+    subtitle: subtitle || '由 PDF 完整高保真解析轉出之 Word 文件',
+    themeColor: '#1E40AF',
+    secondaryColor: '#475569',
+    detectedType: '合約與排版文件',
+    sections: sections.length > 0 ? sections : generateFallbackAnalysis(fileName).sections,
   };
 }
 
@@ -1376,14 +1514,25 @@ app.post('/api/convert', upload.single('file'), async (req: Request, res: Respon
       }
     } else if (ext === 'pdf' || mimeType === 'application/pdf') {
       if (['docx', 'doc', 'word'].includes(targetFormat)) {
-        // PDF to Word: Analyze visual page tables and layout with Gemini
-        const analysis = await analyzeDocumentWithGemini(file.buffer, 'application/pdf', originalName);
+        // PDF to Word: Extract text, headings, clauses, and tables with high accuracy
+        let analysis: DocumentAnalysis;
+        try {
+          analysis = await parsePdfToDocumentAnalysis(file.buffer, originalName);
+        } catch (e) {
+          console.warn('PDF parse error, fallback to Gemini:', e);
+          analysis = await analyzeDocumentWithGemini(file.buffer, 'application/pdf', originalName);
+        }
         outputBuffer = await buildDocxFromAnalysis(analysis);
         outputMimeType = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
         outputExtension = 'docx';
       } else if (['xlsx', 'xls', 'exl', 'excel'].includes(targetFormat)) {
         // PDF to Excel: Reconstruct tabular columns and rows
-        const analysis = await analyzeDocumentWithGemini(file.buffer, 'application/pdf', originalName);
+        let analysis: DocumentAnalysis;
+        try {
+          analysis = await parsePdfToDocumentAnalysis(file.buffer, originalName);
+        } catch {
+          analysis = await analyzeDocumentWithGemini(file.buffer, 'application/pdf', originalName);
+        }
         outputBuffer = buildXlsxFromAnalysis(analysis);
         outputMimeType = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
         outputExtension = 'xlsx';
@@ -1590,7 +1739,164 @@ app.post('/api/convert-merge', upload.array('files'), async (req: Request, res: 
           })
         );
 
-        if (f.mimetype.startsWith('image/')) {
+        if (f.originalname.toLowerCase().endsWith('.pdf') || f.mimetype === 'application/pdf') {
+          try {
+            const pdfAnalysis = await parsePdfToDocumentAnalysis(f.buffer, f.originalname);
+            for (const sec of pdfAnalysis.sections) {
+              if (sec.type === 'heading' && sec.text) {
+                sectionsChildren.push(
+                  new Paragraph({
+                    heading: sec.level === 1 ? HeadingLevel.HEADING_2 : HeadingLevel.HEADING_3,
+                    spacing: { before: 200, after: 80 },
+                    children: [
+                      new TextRun({
+                        text: sec.text,
+                        bold: true,
+                        size: 24,
+                        color: '1E40AF',
+                        font: 'Microsoft JhengHei',
+                      }),
+                    ],
+                  })
+                );
+              } else if (sec.type === 'paragraph' && sec.text) {
+                sectionsChildren.push(
+                  new Paragraph({
+                    spacing: { before: 60, after: 80, line: 300 },
+                    children: [
+                      new TextRun({
+                        text: sec.text,
+                        size: 22,
+                        font: 'Microsoft JhengHei',
+                        color: '1E293B',
+                      }),
+                    ],
+                  })
+                );
+              } else if (sec.type === 'key_values' && sec.keyValues) {
+                const kvRows = sec.keyValues.map(
+                  (kv) =>
+                    new TableRow({
+                      children: [
+                        new TableCell({
+                          width: { size: 30, type: WidthType.PERCENTAGE },
+                          shading: { fill: 'F1F5F9', type: ShadingType.CLEAR },
+                          children: [
+                            new Paragraph({
+                              children: [
+                                new TextRun({
+                                  text: kv.label,
+                                  bold: true,
+                                  size: 20,
+                                  color: '334155',
+                                  font: 'Microsoft JhengHei',
+                                }),
+                              ],
+                            }),
+                          ],
+                        }),
+                        new TableCell({
+                          width: { size: 70, type: WidthType.PERCENTAGE },
+                          children: [
+                            new Paragraph({
+                              children: [
+                                new TextRun({
+                                  text: kv.value,
+                                  size: 20,
+                                  color: '0F172A',
+                                  font: 'Microsoft JhengHei',
+                                }),
+                              ],
+                            }),
+                          ],
+                        }),
+                      ],
+                    })
+                );
+                sectionsChildren.push(
+                  new Table({
+                    width: { size: 100, type: WidthType.PERCENTAGE },
+                    rows: kvRows,
+                    margins: { top: 60, bottom: 120 },
+                  })
+                );
+              } else if (sec.type === 'table' && sec.table) {
+                const tbl = sec.table;
+                const tblRows: TableRow[] = [];
+                const colCount = Math.max(tbl.headers?.length || 0, ...((tbl.rows || []).map((r) => r.length) || [1]));
+                const colW = Math.floor(100 / Math.max(1, colCount));
+
+                if (tbl.headers && tbl.headers.length > 0) {
+                  tblRows.push(
+                    new TableRow({
+                      children: tbl.headers.map(
+                        (h) =>
+                          new TableCell({
+                            width: { size: colW, type: WidthType.PERCENTAGE },
+                            shading: { fill: '1E40AF', type: ShadingType.CLEAR },
+                            children: [
+                              new Paragraph({
+                                children: [
+                                  new TextRun({
+                                    text: h,
+                                    bold: true,
+                                    size: 20,
+                                    color: 'FFFFFF',
+                                    font: 'Microsoft JhengHei',
+                                  }),
+                                ],
+                              }),
+                            ],
+                          })
+                      ),
+                      tableHeader: true,
+                    })
+                  );
+                }
+
+                if (tbl.rows && tbl.rows.length > 0) {
+                  tbl.rows.forEach((r, rIdx) => {
+                    tblRows.push(
+                      new TableRow({
+                        children: r.map(
+                          (c) =>
+                            new TableCell({
+                              width: { size: colW, type: WidthType.PERCENTAGE },
+                              shading: { fill: rIdx % 2 === 1 ? 'F8FAFC' : 'FFFFFF', type: ShadingType.CLEAR },
+                              children: [
+                                new Paragraph({
+                                  children: [
+                                    new TextRun({
+                                      text: c,
+                                      size: 20,
+                                      font: 'Microsoft JhengHei',
+                                      color: '1E293B',
+                                    }),
+                                  ],
+                                }),
+                              ],
+                            })
+                        ),
+                      })
+                    );
+                  });
+                }
+
+                if (tblRows.length > 0) {
+                  sectionsChildren.push(
+                    new Table({
+                      width: { size: 100, type: WidthType.PERCENTAGE },
+                      rows: tblRows,
+                      margins: { top: 80, bottom: 160 },
+                    })
+                  );
+                }
+              }
+            }
+          } catch (pdfErr) {
+            console.warn('Failed to parse PDF in merge docx:', pdfErr);
+          }
+        } else if (f.mimetype.startsWith('image/')) {
           try {
             sectionsChildren.push(
               new Paragraph({

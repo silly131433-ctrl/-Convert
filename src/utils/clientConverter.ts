@@ -480,6 +480,77 @@ export async function mergeMultipleFilesToOnePdf(
 }
 
 /**
+ * Extract readable text lines from PDF in browser
+ */
+export async function extractPdfTextBrowser(file: File): Promise<string[]> {
+  try {
+    const arrayBuffer = await file.arrayBuffer();
+    const bytes = new Uint8Array(arrayBuffer);
+
+    // Chunked conversion to avoid maximum call stack size exceeded
+    let binary = '';
+    const chunkSize = 16384;
+    for (let i = 0; i < bytes.length; i += chunkSize) {
+      const chunk = bytes.subarray(i, Math.min(i + chunkSize, bytes.length));
+      binary += String.fromCharCode(...chunk);
+    }
+
+    const lines: string[] = [];
+
+    // Extract text in parentheses (Tj / TJ operators in PDF)
+    const tjRegex = /\(([^()]{1,200})\)\s*Tj/g;
+    let match: RegExpExecArray | null;
+    let currentLine = '';
+
+    while ((match = tjRegex.exec(binary)) !== null) {
+      const raw = match[1]
+        .replace(/\\([0-7]{1,3})/g, (_, oct) => String.fromCharCode(parseInt(oct, 8)))
+        .replace(/\\([()nrtbf\\])/g, (_, ch) => (ch === 'n' ? '\n' : ch === 't' ? '\t' : ch));
+
+      const trimmed = raw.trim();
+      if (trimmed.length > 0) {
+        currentLine += (currentLine ? ' ' : '') + trimmed;
+        if (raw.endsWith('\n') || currentLine.length > 60) {
+          lines.push(currentLine);
+          currentLine = '';
+        }
+      }
+    }
+    if (currentLine) {
+      lines.push(currentLine);
+    }
+
+    if (lines.length === 0) {
+      // Fallback: look for BT ... ET blocks
+      const btMatches = Array.from(binary.matchAll(/BT[\s\S]*?ET/g));
+      for (const block of btMatches) {
+        const words = Array.from(block[0].matchAll(/\(([^()]{1,100})\)/g)).map((m) => m[1]);
+        if (words.length > 0) {
+          lines.push(words.join(' '));
+        }
+      }
+    }
+
+    return lines
+      .map((l) => l.trim())
+      .filter((l) => l.length > 0 && !/^--\s*\d+\s+of\s+\d+\s*--$/i.test(l));
+  } catch (err) {
+    console.warn('Browser PDF text extraction failed:', err);
+    return [];
+  }
+}
+
+/**
+ * Convert PDF to DOCX in browser client fallback
+ */
+export async function clientConvertPdfToDocx(
+  file: File
+): Promise<{ fileName: string; mimeType: string; size: number; base64: string }> {
+  const baseName = file.name.replace(/\.[^/.]+$/, '');
+  return await mergeMultipleFilesToOneDocx([file], `${baseName}_converted.docx`);
+}
+
+/**
  * 6. MERGE ALL MULTIPLE FILES INTO A SINGLE WORD (DOCX) REPORT!
  */
 export async function mergeMultipleFilesToOneDocx(
@@ -558,122 +629,150 @@ export async function mergeMultipleFilesToOneDocx(
       }
     }
 
-    // Detail table for this file
-    sectionsChildren.push(
-      new Table({
-        width: { size: 100, type: WidthType.PERCENTAGE },
-        rows: [
-          new TableRow({
-            children: [
-              new TableCell({
-                shading: { fill: '2563EB', type: ShadingType.CLEAR },
+    if (ext === 'pdf' || file.type === 'application/pdf') {
+      const pdfLines = await extractPdfTextBrowser(file);
+      if (pdfLines.length > 0) {
+        let currentTableRows: string[][] = [];
+        const flushTable = () => {
+          if (currentTableRows.length > 0) {
+            const headers = currentTableRows[0];
+            const rows = currentTableRows.slice(1);
+            const colW = Math.floor(100 / Math.max(1, headers.length));
+            const tblRows = [
+              new TableRow({
+                children: headers.map(
+                  (h) =>
+                    new TableCell({
+                      width: { size: colW, type: WidthType.PERCENTAGE },
+                      shading: { fill: '1E40AF', type: ShadingType.CLEAR },
+                      children: [
+                        new Paragraph({
+                          children: [
+                            new TextRun({
+                              text: h,
+                              bold: true,
+                              color: 'FFFFFF',
+                              font: 'Microsoft JhengHei',
+                            }),
+                          ],
+                        }),
+                      ],
+                    })
+                ),
+                tableHeader: true,
+              }),
+              ...rows.map(
+                (r, rIdx) =>
+                  new TableRow({
+                    children: r.map(
+                      (c) =>
+                        new TableCell({
+                          width: { size: colW, type: WidthType.PERCENTAGE },
+                          shading: {
+                            fill: rIdx % 2 === 1 ? 'F8FAFC' : 'FFFFFF',
+                            type: ShadingType.CLEAR,
+                          },
+                          children: [
+                            new Paragraph({
+                              children: [
+                                new TextRun({
+                                  text: c,
+                                  font: 'Microsoft JhengHei',
+                                  color: '1E293B',
+                                }),
+                              ],
+                            }),
+                          ],
+                        })
+                    ),
+                  })
+              ),
+            ];
+            sectionsChildren.push(
+              new Table({
+                width: { size: 100, type: WidthType.PERCENTAGE },
+                rows: tblRows,
+                margins: { top: 80, bottom: 160 },
+              })
+            );
+            currentTableRows = [];
+          }
+        };
+
+        for (const line of pdfLines) {
+          const cols = line.split(/\t+|\s{2,}|\|/).map((c: string) => c.trim()).filter((c: string) => c.length > 0);
+          const isHeading =
+            /^第[一二三四五六七八九十0-9]+[条章节款]/.test(line) ||
+            (/^[0-9]+(\.[0-9]+)*\s+[^\s]+/.test(line) && line.length < 50);
+
+          if (isHeading) {
+            flushTable();
+            sectionsChildren.push(
+              new Paragraph({
+                heading: line.startsWith('第') ? HeadingLevel.HEADING_2 : HeadingLevel.HEADING_3,
+                spacing: { before: 200, after: 80 },
                 children: [
-                  new Paragraph({
-                    children: [
-                      new TextRun({
-                        text: '檔案名稱',
-                        bold: true,
-                        color: 'FFFFFF',
-                        font: 'Microsoft JhengHei',
-                      }),
-                    ],
+                  new TextRun({
+                    text: line,
+                    bold: true,
+                    size: 24,
+                    color: '1E40AF',
+                    font: 'Microsoft JhengHei',
                   }),
                 ],
-              }),
-              new TableCell({
-                shading: { fill: '2563EB', type: ShadingType.CLEAR },
+              })
+            );
+            continue;
+          }
+
+          const kvMatch = line.match(/^([^：:]{2,10})[：:]\s*(.+)$/);
+          if (kvMatch && !isHeading) {
+            flushTable();
+            sectionsChildren.push(
+              new Paragraph({
+                spacing: { before: 60, after: 60 },
                 children: [
-                  new Paragraph({
-                    children: [
-                      new TextRun({
-                        text: '檔案格式',
-                        bold: true,
-                        color: 'FFFFFF',
-                        font: 'Microsoft JhengHei',
-                      }),
-                    ],
+                  new TextRun({
+                    text: `${kvMatch[1]}：`,
+                    bold: true,
+                    color: '334155',
+                    font: 'Microsoft JhengHei',
+                  }),
+                  new TextRun({
+                    text: kvMatch[2],
+                    color: '0F172A',
+                    font: 'Microsoft JhengHei',
                   }),
                 ],
-              }),
-              new TableCell({
-                shading: { fill: '2563EB', type: ShadingType.CLEAR },
-                children: [
-                  new Paragraph({
-                    children: [
-                      new TextRun({
-                        text: '檔案大小',
-                        bold: true,
-                        color: 'FFFFFF',
-                        font: 'Microsoft JhengHei',
-                      }),
-                    ],
-                  }),
-                ],
-              }),
-              new TableCell({
-                shading: { fill: '2563EB', type: ShadingType.CLEAR },
-                children: [
-                  new Paragraph({
-                    children: [
-                      new TextRun({
-                        text: '排版保真狀態',
-                        bold: true,
-                        color: 'FFFFFF',
-                        font: 'Microsoft JhengHei',
-                      }),
-                    ],
-                  }),
-                ],
-              }),
-            ],
-          }),
-          new TableRow({
-            children: [
-              new TableCell({
-                children: [
-                  new Paragraph({
-                    children: [new TextRun({ text: file.name, font: 'Microsoft JhengHei' })],
-                  }),
-                ],
-              }),
-              new TableCell({
-                children: [
-                  new Paragraph({
-                    children: [new TextRun({ text: ext.toUpperCase(), font: 'Microsoft JhengHei' })],
-                  }),
-                ],
-              }),
-              new TableCell({
-                children: [
-                  new Paragraph({
-                    children: [
-                      new TextRun({
-                        text: `${(file.size / 1024).toFixed(1)} KB`,
-                        font: 'Microsoft JhengHei',
-                      }),
-                    ],
-                  }),
-                ],
-              }),
-              new TableCell({
-                children: [
-                  new Paragraph({
-                    children: [
-                      new TextRun({
-                        text: '100% 精準度還原',
-                        color: '10B981',
-                        bold: true,
-                        font: 'Microsoft JhengHei',
-                      }),
-                    ],
-                  }),
-                ],
-              }),
-            ],
-          }),
-        ],
-      })
-    );
+              })
+            );
+            continue;
+          }
+
+          if (cols.length >= 2 && cols.length <= 5 && line.length < 120) {
+            currentTableRows.push(cols);
+            continue;
+          } else {
+            flushTable();
+          }
+
+          sectionsChildren.push(
+            new Paragraph({
+              spacing: { before: 60, after: 80, line: 300 },
+              children: [
+                new TextRun({
+                  text: line,
+                  size: 22,
+                  font: 'Microsoft JhengHei',
+                  color: '1E293B',
+                }),
+              ],
+            })
+          );
+        }
+        flushTable();
+      }
+    }
   }
 
   const doc = new Document({
