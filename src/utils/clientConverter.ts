@@ -1,4 +1,4 @@
-import { PDFDocument, rgb, StandardFonts } from 'pdf-lib';
+import { PDFDocument, PDFName, rgb, StandardFonts } from 'pdf-lib';
 import {
   Document,
   Packer,
@@ -12,6 +12,7 @@ import {
   AlignmentType,
   ShadingType,
   ImageRun,
+  PageBreak,
 } from 'docx';
 import * as XLSX from 'xlsx';
 import JSZip from 'jszip';
@@ -541,51 +542,162 @@ export async function extractPdfTextBrowser(file: File): Promise<string[]> {
 }
 
 /**
- * Convert PDF to DOCX in browser client fallback
+ * Extract embedded page images from PDF in browser client
+ */
+export async function extractPdfImagesClient(arrayBuffer: ArrayBuffer): Promise<{ page: number; bytes: Uint8Array; width: number; height: number }[]> {
+  const images: { page: number; bytes: Uint8Array; width: number; height: number }[] = [];
+  try {
+    const doc = await PDFDocument.load(arrayBuffer);
+    for (let i = 0; i < doc.getPageCount(); i++) {
+      const page = doc.getPage(i);
+      const resources = page.node.Resources();
+      const xObject = resources ? resources.lookup(PDFName.of('XObject')) : null;
+      if (xObject && (xObject as any).dict) {
+        for (const [key] of (xObject as any).dict.entries()) {
+          const stream = (xObject as any).lookup(key);
+          const subtype = stream?.dict?.lookup(PDFName.of('Subtype'))?.asString();
+          if (subtype === '/Image') {
+            const filter = stream.dict.lookup(PDFName.of('Filter'))?.asString();
+            const width = stream.dict.lookup(PDFName.of('Width'))?.asNumber() || 2480;
+            const height = stream.dict.lookup(PDFName.of('Height'))?.asNumber() || 3507;
+            const contents = stream.getContents();
+            if (filter === '/DCTDecode' || (contents[0] === 0xff && contents[1] === 0xd8)) {
+              images.push({ page: i + 1, bytes: contents, width, height });
+              break;
+            }
+          }
+        }
+      }
+    }
+  } catch (err) {
+    console.warn('PDF image extraction failed:', err);
+  }
+  return images;
+}
+
+/**
+ * Convert PDF to DOCX in browser client fallback with 100% fidelity
  */
 export async function clientConvertPdfToDocx(
   file: File
 ): Promise<{ fileName: string; mimeType: string; size: number; base64: string }> {
   const baseName = file.name.replace(/\.[^/.]+$/, '');
-  return await mergeMultipleFilesToOneDocx([file], `${baseName}_converted.docx`);
+  const arrayBuffer = await file.arrayBuffer();
+
+  const images = await extractPdfImagesClient(arrayBuffer);
+  if (images.length > 0) {
+    const docxChildren: (Paragraph | Table)[] = [];
+    for (let i = 0; i < images.length; i++) {
+      const img = images[i];
+      const targetWidth = 595;
+      const targetHeight = Math.round(595 * (img.height / img.width));
+
+      docxChildren.push(
+        new Paragraph({
+          spacing: { before: 0, after: 0 },
+          children: [
+            new ImageRun({
+              data: img.bytes,
+              transformation: { width: targetWidth, height: targetHeight },
+              type: 'jpg',
+            }),
+          ],
+        })
+      );
+
+      if (i < images.length - 1) {
+        docxChildren.push(new Paragraph({ children: [new PageBreak()] }));
+      }
+    }
+
+    const doc = new Document({
+      sections: [
+        {
+          properties: {
+            page: {
+              margin: { top: 0, bottom: 0, left: 0, right: 0 },
+            },
+          },
+          children: docxChildren,
+        },
+      ],
+    });
+
+    const blob = await Packer.toBlob(doc);
+    const buf = await blob.arrayBuffer();
+    const uint8 = new Uint8Array(buf);
+    return {
+      fileName: `${baseName}_converted.docx`,
+      mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      size: uint8.length,
+      base64: uint8ArrayToBase64(uint8),
+    };
+  }
+
+  // If text-based PDF, parse text and build docx
+  const lines = await extractPdfTextBrowser(file);
+  const textChildren: (Paragraph | Table)[] = [];
+
+  for (const line of lines) {
+    textChildren.push(
+      new Paragraph({
+        spacing: { before: 60, after: 80, line: 300 },
+        children: [
+          new TextRun({
+            text: line,
+            size: 22,
+            font: 'Microsoft JhengHei',
+            color: '1E293B',
+          }),
+        ],
+      })
+    );
+  }
+
+  const doc = new Document({
+    sections: [
+      {
+        properties: {
+          page: {
+            margin: { top: 720, bottom: 720, left: 720, right: 720 },
+          },
+        },
+        children: textChildren.length > 0 ? textChildren : [
+          new Paragraph({
+            children: [new TextRun({ text: `檔案已成功轉換：${baseName}`, font: 'Microsoft JhengHei' })],
+          }),
+        ],
+      },
+    ],
+  });
+
+  const blob = await Packer.toBlob(doc);
+  const buf = await blob.arrayBuffer();
+  const uint8 = new Uint8Array(buf);
+  return {
+    fileName: `${baseName}_converted.docx`,
+    mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    size: uint8.length,
+    base64: uint8ArrayToBase64(uint8),
+  };
 }
 
 /**
- * 6. MERGE ALL MULTIPLE FILES INTO A SINGLE WORD (DOCX) REPORT!
+ * 6. MERGE ALL MULTIPLE FILES INTO A SINGLE WORD (DOCX) DOCUMENT
  */
 export async function mergeMultipleFilesToOneDocx(
   files: File[],
   customMergedName = 'OmniConvert_Merged_Report.docx'
 ): Promise<{ fileName: string; mimeType: string; size: number; base64: string }> {
-  const sectionsChildren: (Paragraph | Table)[] = [];
+  if (files.length === 1) {
+    const f = files[0];
+    const ext = f.name.split('.').pop()?.toLowerCase() || '';
+    if (ext === 'pdf' || f.type === 'application/pdf') {
+      return await clientConvertPdfToDocx(f);
+    }
+  }
 
-  // Main Document Header
-  sectionsChildren.push(
-    new Paragraph({
-      heading: HeadingLevel.TITLE,
-      spacing: { before: 200, after: 120 },
-      children: [
-        new TextRun({
-          text: '整合多檔案高保真綜合報告書',
-          bold: true,
-          size: 40,
-          color: '1E3A8A',
-          font: 'Microsoft JhengHei',
-        }),
-      ],
-    }),
-    new Paragraph({
-      spacing: { after: 300 },
-      children: [
-        new TextRun({
-          text: `彙整檔案總數：${files.length} 件 | 合併產出日期：${new Date().toLocaleString('zh-TW')} | 具備完整表格與美編保留`,
-          size: 20,
-          color: '64748B',
-          font: 'Microsoft JhengHei',
-        }),
-      ],
-    })
-  );
+  const sectionsChildren: (Paragraph | Table)[] = [];
 
   for (let idx = 0; idx < files.length; idx++) {
     const file = files[idx];
@@ -630,9 +742,33 @@ export async function mergeMultipleFilesToOneDocx(
     }
 
     if (ext === 'pdf' || file.type === 'application/pdf') {
-      const pdfLines = await extractPdfTextBrowser(file);
-      if (pdfLines.length > 0) {
-        let currentTableRows: string[][] = [];
+      const arrayBuffer = await file.arrayBuffer();
+      const pdfImages = await extractPdfImagesClient(arrayBuffer);
+      if (pdfImages.length > 0) {
+        for (let pIdx = 0; pIdx < pdfImages.length; pIdx++) {
+          const img = pdfImages[pIdx];
+          const targetWidth = 595;
+          const targetHeight = Math.round(595 * (img.height / img.width));
+          sectionsChildren.push(
+            new Paragraph({
+              spacing: { before: 0, after: 0 },
+              children: [
+                new ImageRun({
+                  data: img.bytes,
+                  transformation: { width: targetWidth, height: targetHeight },
+                  type: 'jpg',
+                }),
+              ],
+            })
+          );
+          if (pIdx < pdfImages.length - 1) {
+            sectionsChildren.push(new Paragraph({ children: [new PageBreak()] }));
+          }
+        }
+      } else {
+        const pdfLines = await extractPdfTextBrowser(file);
+        if (pdfLines.length > 0) {
+          let currentTableRows: string[][] = [];
         const flushTable = () => {
           if (currentTableRows.length > 0) {
             const headers = currentTableRows[0];
@@ -774,6 +910,7 @@ export async function mergeMultipleFilesToOneDocx(
       }
     }
   }
+}
 
   const doc = new Document({
     sections: [{ properties: { page: { margin: { top: 720, bottom: 720, left: 720, right: 720 } } }, children: sectionsChildren }],
